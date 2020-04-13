@@ -1,10 +1,11 @@
 const cron = require("node-cron");
-const fs = require("fs");
 let shell = require("shelljs");
 let nodemailer = require("nodemailer");
 
 const PLUGIN_ID = 'signalk-scheduler'
 const PLUGIN_NAME = 'Scheduler'
+
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 module.exports = function(app) {
   var plugin = {};
@@ -13,7 +14,7 @@ module.exports = function(app) {
 
   plugin.id = PLUGIN_ID;
   plugin.name = PLUGIN_NAME;
-  plugin.description = 'Plugin that does stuff';
+  plugin.description = 'Cron like scheduler for SignalK. It can execute shell commands and SignalK puts (like turning on a switch) at a prescibed time and day(s)';
 
   plugin.schema = {
     "type": "object",
@@ -162,59 +163,14 @@ module.exports = function(app) {
 
   plugin.start = function(options, restartPlugin) {
     app.debug('Plugin started');
+    jobsTracker = {};
     jobOptions = options;
 
     for (var jobName in options.job) {
       let job = options.job[jobName];
 
       if (job.enabled) {
-        app.debug(`Creating schedule for job ${job.name}`);
-        let schedule = createSchedule(job.time, job.days);
-
-        if (job.commandType == 'Shell') {
-          let newjob = cron.schedule(schedule, function() {
-            if (shell.exec(job.command).code !== 0) {
-              shell.exit(1);
-              app.error(`Scheduled job ${job.name} failed.`);
-
-              if (job.sendEmail) {
-                let to = job.toEmail;
-                let subject = ``;
-                let text = ``;
-                sendEmail(to, subject, text);
-              }
-            } else {
-              shell.echo(`Schedule job ${job.name} was successful.`);
-              if (job.sendEmail) {
-                let to = job.toEmail;
-                let subject = ``;
-                let text = ``;
-                sendEmail(to, subject, text);
-              }
-            }
-          });
-
-          jobsTracker[job.name] = newjob;
-
-          app.debug(`Created cron job: ${schedule} Shell Command ${job.command}`);
-        } else if (job.commandType == 'SignalK Put') {
-          let newjob = cron.schedule(schedule, function() {
-            handleDelta(job.path, job.value);
-
-            if (job.sendEmail) {
-              let to = job.toEmail;
-              let subject = ``;
-              let text = ``;
-              sendEmail(to, subject, text);
-            }
-          });
-
-          jobsTracker[job.name] = newjob;
-
-          app.debug(`Created cron job: ${schedule} SignalK Put ${job.path}=${job.value}`);
-        } else {
-          app.error(`Job ${jobName} command type ${job.commandType} is not recognized.`);
-        }
+        createJob(job);
       } else {
         app.debug(`Job ${job.name} is not enabled.`)
       }
@@ -261,7 +217,9 @@ module.exports = function(app) {
         return
       }
 
-      res.json(job.getStatus());
+      res.json({
+        status: job.getStatus()
+      });
     })
 
     router.get("/jobs/:jobid/start", (req, res) => {
@@ -276,7 +234,10 @@ module.exports = function(app) {
         return
       }
 
-      res.json(job.start());
+      job.start();
+      res.json({
+        status: job.getStatus()
+      });
     })
 
     router.get("/jobs/:jobid/stop", (req, res) => {
@@ -291,8 +252,121 @@ module.exports = function(app) {
         return
       }
 
-      res.json(job.stop());
+      job.stop();
+      res.json({
+        status: job.getStatus()
+      });
     })
+
+    router.post("/jobs/create", (req, res) => {
+      let job = req.body;
+
+      let validated = validateJob(job);
+      if (validated !== true) {
+        app.debug(validated);
+        res.status(400);
+        res.send(validated);
+        return;
+      }
+
+      if (job.enabled) {
+        createJob(job);
+      }
+
+      jobOptions.job.push(job);
+      saveOptions(jobOptions);
+
+      res.json({
+        status: job.getStatus()
+      });
+    })
+
+    router.get("/jobs/:jobid/destroy", (req, res) => {
+      let jobid = req.params.jobid;
+      let job = jobsTracker[jobid];
+
+      if (!job) {
+        let msg = 'No job found for ' + jobid
+        app.debug(msg)
+        res.status(400)
+        res.send(msg)
+        return
+      }
+
+      //remove job from the config
+      delete jobOptions.job[jobid];
+      let state = saveOptions(jobOptions);
+      if (state != 'SUCCESS') {
+        let msg = '';
+        app.debug(msg);
+        res.status(500);
+        res.send(msg);
+        return;
+      }
+
+      job.destroy();
+
+      //remove job from the jobsTracker
+      delete jobsTracker[jobid];
+
+      res.json({
+        status: 'destroyed'
+      });
+    })
+  }
+
+  function createJob(job) {
+    app.debug(`Creating schedule for job ${job.name}`);
+    let schedule = createSchedule(job.time, job.days);
+
+    if (job.commandType == 'Shell') {
+      let newjob = cron.schedule(schedule, function() {
+        if (shell.exec(job.command).code !== 0) {
+          shell.exit(1);
+          let msg = `Scheduled job ${job.name} failed.`;
+          app.error(msg);
+
+          if (job.sendEmail) {
+            let to = job.toEmail;
+            let subject = msg;
+            let text = msg;
+            sendEmail(to, subject, text);
+          }
+        } else {
+          let msg = `Scheduled job ${job.name} was successful.`;
+          shell.echo(msg);
+          if (job.sendEmail) {
+            let to = job.toEmail;
+            let subject = msg;
+            let text = msg;
+            sendEmail(to, subject, text);
+          }
+        }
+      });
+
+      jobsTracker[job.name] = newjob;
+
+      app.debug(`Created cron job: ${schedule} Shell Command ${job.command}`);
+    } else if (job.commandType == 'SignalK Put') {
+      let newjob = cron.schedule(schedule, function() {
+        app.putSelfPath(job.path, job.value);
+
+        let msg = `${job.path} set to ${job.value}`;
+        app.debug(msg);
+
+        if (job.sendEmail) {
+          let to = job.toEmail;
+          let subject = `Scheduled job ${job.name} was successful.`;
+          sendEmail(to, subject, msg);
+        }
+      });
+
+      jobsTracker[job.name] = newjob;
+
+      app.debug(`Created cron job: ${schedule} SignalK Put ${job.path}=${job.value}`);
+    } else {
+      app.error(`Job ${jobName} command type ${job.commandType} is not recognized.`);
+    }
   }
 
   function createSchedule(time, days) {
@@ -300,26 +374,11 @@ module.exports = function(app) {
     let minutes = timeSplit[1];
     let hours = timeSplit[0];
 
-    let WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     let dayNums = days.map(function(day) {
       return WEEKDAYS.indexOf(day);
     })
 
     return `0 ${minutes} ${hours} * * ${dayNums}`;
-  }
-
-  function handleDelta(path, value) {
-    let delta = {
-      "updates": [{
-        "values": [{
-          path: path,
-          value: value
-        }]
-      }]
-    }
-    app.debug(JSON.stringify(delta))
-
-    app.handleMessage(PLUGIN_ID, delta)
   }
 
   function sendEmail(to, subject, text) {
@@ -348,6 +407,77 @@ module.exports = function(app) {
         app.log('Email sent: ' + info.response);
       }
     });
+  }
+
+  function saveOptions(options) {
+    let status = 'SUCCESS';
+    app.savePluginOptions(options, err => {
+      if (err) {
+        app.error(err.toString())
+        status = 'FAILURE';
+      }
+    })
+    return status;
+  }
+
+  function validateJob(job) {
+    let example = {
+      "name": "Test1",
+      "time": "12:00",
+      "days": [
+        "Tuesday",
+        "Thursday",
+        "Saturday"
+      ],
+      "commandType": "SignalK Put",
+      "enabled": true,
+      "sendEmail": false,
+    };
+
+    //compare objects
+
+
+    //make sure days are correct
+    let daysTest = days.map(function(day) {
+      return WEEKDAYS.indexOf(day);
+    })
+    if (daysTest.includes(-1) || daysTest.length > 7) {
+      return 'Days must be one or more of ' + WEEKDAYS;
+    }
+
+    //make sure commandType is correct
+    if (job.commandType != 'Shell' || job.commandType != 'SignalK Put') {
+      return "commandType must be 'Shell' or 'SignalK Put'";
+    }
+
+    //if commandType == shell
+    if (job.commandType == 'Shell') {
+      if (!job.command) {
+        exmaple.command = '';
+        return "commandType of 'Shell' must include a 'command' property. " + JSON.stringify(example);
+      }
+    }
+
+    //if commandType == SignalK Put
+    if (job.commandType == 'SignalK Put') {
+      if (!job.path || !job.value) {
+        example.path = "electrical.switches.bank.erDcr22.wmBackwash.state";
+        example.value = "1";
+
+        return "commandType of 'SignalK Put' must include a 'path' and 'value' properties. " + JSON.stringify(example);
+      }
+    }
+
+    //if sendEmail
+    if (job.sendEmail) {
+      if (!job.toEmail) {
+        example.sendEmail = true;
+        example.toEmail = 'someone@something.com';
+        return "Property 'toEmail' must be a valid address when 'sendEmail' is true. " + JSON.stringify(example);
+      }
+    }
+
+    return true;
   }
 
   return plugin;
