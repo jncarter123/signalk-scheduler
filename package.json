@@ -1,0 +1,20 @@
+{
+  "name": "signalk-scheduler",
+  "version": "1.0.0",
+  "description": "Cron like scheduler for SignalK",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "signalk-node-server-plugin"
+  ],
+  "author": "Jeremy Carter",
+  "license": "ISC",
+  "dependencies": {
+    "fs": "0.0.1-security",
+    "node-cron": "^2.0.3",
+    "nodemailer": "^6.4.6",
+    "shelljs": "^0.8.3"
+  }
+}
