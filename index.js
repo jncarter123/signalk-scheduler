@@ -322,7 +322,6 @@ module.exports = function(app) {
     if (job.commandType == 'Shell') {
       let newjob = cron.schedule(schedule, function() {
         if (shell.exec(job.command).code !== 0) {
-          shell.exit(1);
           let msg = `Scheduled job ${job.name} failed.`;
           app.error(msg);
 
