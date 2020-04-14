@@ -116,7 +116,8 @@ module.exports = function(app) {
                     },
                     "command": {
                       "type": "string",
-                      "title": "Shell Command"
+                      "title": "Shell Command",
+                      "description": "The command to be executed via sh (linux) or cmd.exe (windows)."
                     }
                   }
                 },
@@ -169,13 +170,8 @@ module.exports = function(app) {
     for (var jobName in options.job) {
       let job = options.job[jobName];
 
-      if (job.enabled) {
-        createJob(job);
-      } else {
-        app.debug(`Job ${job.name} is not enabled.`)
-      }
+      createJob(job);
     }
-
   };
 
   plugin.stop = function() {
@@ -201,11 +197,12 @@ module.exports = function(app) {
 
       }
 
-      job.isRunning = jobsTracker[jobid].running || false;
+      job.isRunning = jobsTracker[jobid].hasOwnProperty('running') ? jobsTracker[jobid].running : false;
+      job.status = jobsTracker[jobid].getStatus() || 'not scheduled';
       res.json(job);
     })
 
-    router.get("/jobs/:jobid/status", (req, res) => {
+    router.put("/jobs/:jobid/start", (req, res) => {
       let jobid = req.params.jobid;
       let job = jobsTracker[jobid];
 
@@ -217,21 +214,19 @@ module.exports = function(app) {
         return
       }
 
-      res.json({
-        status: job.getStatus()
-      });
-    })
+      //enable job from the config
+      let obj = jobOptions.job.find(f => f.name === jobid);
+      if (obj) {
+        obj.enabled = true;
+      }
 
-    router.get("/jobs/:jobid/start", (req, res) => {
-      let jobid = req.params.jobid;
-      let job = jobsTracker[jobid];
-
-      if (!job) {
-        let msg = 'No job found for ' + jobid
-        app.debug(msg)
-        res.status(400)
-        res.send(msg)
-        return
+      let state = saveOptions(jobOptions);
+      if (state != 'SUCCESS') {
+        let msg = 'Could not save options.';
+        app.debug(msg);
+        res.status(500);
+        res.send(msg);
+        return;
       }
 
       job.start();
@@ -240,7 +235,7 @@ module.exports = function(app) {
       });
     })
 
-    router.get("/jobs/:jobid/stop", (req, res) => {
+    router.put("/jobs/:jobid/stop", (req, res) => {
       let jobid = req.params.jobid;
       let job = jobsTracker[jobid];
 
@@ -250,6 +245,21 @@ module.exports = function(app) {
         res.status(400)
         res.send(msg)
         return
+      }
+
+      //disable job from the config
+      let obj = jobOptions.job.find(f => f.name === jobid);
+      if (obj) {
+        obj.enabled = false;
+      }
+
+      let state = saveOptions(jobOptions);
+      if (state != 'SUCCESS') {
+        let msg = 'Could not save options.';
+        app.debug(msg);
+        res.status(500);
+        res.send(msg);
+        return;
       }
 
       job.stop();
@@ -269,19 +279,17 @@ module.exports = function(app) {
         return;
       }
 
-      if (job.enabled) {
-        createJob(job);
-      }
+      let newjob = createJob(job);
 
       jobOptions.job.push(job);
       saveOptions(jobOptions);
 
       res.json({
-        status: job.getStatus()
+        status: newjob.getStatus()
       });
     })
 
-    router.get("/jobs/:jobid/destroy", (req, res) => {
+    router.delete("/jobs/:jobid", (req, res) => {
       let jobid = req.params.jobid;
       let job = jobsTracker[jobid];
 
@@ -294,7 +302,8 @@ module.exports = function(app) {
       }
 
       //remove job from the config
-      delete jobOptions.job[jobid];
+      jobOptions.job.splice(jobOptions.job.findIndex(v => v.name === jobid), 1);
+
       let state = saveOptions(jobOptions);
       if (state != 'SUCCESS') {
         let msg = '';
@@ -319,28 +328,25 @@ module.exports = function(app) {
     app.debug(`Creating schedule for job ${job.name}`);
     let schedule = createSchedule(job.time, job.days);
 
+    let newjob;
     if (job.commandType == 'Shell') {
-      let newjob = cron.schedule(schedule, function() {
-        if (shell.exec(job.command).code !== 0) {
-          let msg = `Scheduled job ${job.name} failed.`;
-          app.error(msg);
+      newjob = cron.schedule(schedule, function() {
+
+        shell.exec(job.command, function(code, stdout, stderr) {
+          let msg = `Scheduled job ${job.name} ${code != 0 ? 'failed' : 'passed'}.`;
+          let msgDetails = `Exit Code: ${code} \r\n Program output: ${stdout} \r\n Program error: ${stderr}`;
+
+          if (code != 0) {
+            app.error(msg);
+            app.error(msgDetails);
+          }
 
           if (job.sendEmail) {
-            let to = job.toEmail;
-            let subject = msg;
-            let text = msg;
-            sendEmail(to, subject, text);
+            sendEmail(job.toEmail, msg, msgDetails);
           }
-        } else {
-          let msg = `Scheduled job ${job.name} was successful.`;
-          shell.echo(msg);
-          if (job.sendEmail) {
-            let to = job.toEmail;
-            let subject = msg;
-            let text = msg;
-            sendEmail(to, subject, text);
-          }
-        }
+        });
+      }, {
+        scheduled: job.enabled
       });
 
       jobsTracker[job.name] = newjob;
@@ -358,6 +364,8 @@ module.exports = function(app) {
           let subject = `Scheduled job ${job.name} was successful.`;
           sendEmail(to, subject, msg);
         }
+      }, {
+        scheduled: job.enabled
       });
 
       jobsTracker[job.name] = newjob;
@@ -366,6 +374,8 @@ module.exports = function(app) {
     } else {
       app.error(`Job ${jobName} command type ${job.commandType} is not recognized.`);
     }
+
+    return newjob;
   }
 
   function createSchedule(time, days) {
@@ -437,7 +447,7 @@ module.exports = function(app) {
 
 
     //make sure days are correct
-    let daysTest = days.map(function(day) {
+    let daysTest = job.days.map(function(day) {
       return WEEKDAYS.indexOf(day);
     })
     if (daysTest.includes(-1) || daysTest.length > 7) {
@@ -445,7 +455,7 @@ module.exports = function(app) {
     }
 
     //make sure commandType is correct
-    if (job.commandType != 'Shell' || job.commandType != 'SignalK Put') {
+    if (job.commandType != 'Shell' && job.commandType != 'SignalK Put') {
       return "commandType must be 'Shell' or 'SignalK Put'";
     }
 
