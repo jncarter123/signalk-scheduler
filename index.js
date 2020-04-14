@@ -282,7 +282,15 @@ module.exports = function(app) {
       let newjob = createJob(job);
 
       jobOptions.job.push(job);
-      saveOptions(jobOptions);
+
+      let state = saveOptions(jobOptions);
+      if (state != 'SUCCESS') {
+        let msg = '';
+        app.debug(msg);
+        res.status(500);
+        res.send(msg);
+        return;
+      }
 
       res.json({
         status: newjob.getStatus()
@@ -333,7 +341,7 @@ module.exports = function(app) {
       newjob = cron.schedule(schedule, function() {
 
         shell.exec(job.command, function(code, stdout, stderr) {
-          let msg = `Scheduled job ${job.name} ${code != 0 ? 'failed' : 'passed'}.`;
+          let msg = `Scheduled job ${job.name} ${code != 0 ? 'failed' : 'was successful'}.`;
           let msgDetails = `Exit Code: ${code} \r\n Program output: ${stdout} \r\n Program error: ${stderr}`;
 
           if (code != 0) {
