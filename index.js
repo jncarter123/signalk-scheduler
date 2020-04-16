@@ -1,4 +1,5 @@
 const cron = require("node-cron");
+const os = require('os');
 let shell = require("shelljs");
 let nodemailer = require("nodemailer");
 
@@ -194,7 +195,6 @@ module.exports = function(app) {
         res.status(400)
         res.send(msg)
         return
-
       }
 
       job.isRunning = jobsTracker[jobid].hasOwnProperty('running') ? jobsTracker[jobid].running : false;
@@ -341,8 +341,9 @@ module.exports = function(app) {
       newjob = cron.schedule(schedule, function() {
 
         shell.exec(job.command, function(code, stdout, stderr) {
-          let msg = `Scheduled job ${job.name} ${code != 0 ? 'failed' : 'was successful'}.`;
-          let msgDetails = `Exit Code: ${code} \r\n Program output: ${stdout} \r\n Program error: ${stderr}`;
+          let hostname = os.hostname();
+          let msg = `${hostname}: Scheduled job ${job.name} ${code != 0 ? 'failed' : 'was successful'}.`;
+          let msgDetails = `Host: ${hostname} \r\nExit Code: ${code} \r\nProgram output: ${stdout} \r\nProgram error: ${stderr}`;
 
           if (code != 0) {
             app.error(msg);
@@ -369,7 +370,8 @@ module.exports = function(app) {
 
         if (job.sendEmail) {
           let to = job.toEmail;
-          let subject = `Scheduled job ${job.name} was successful.`;
+          let hostname = os.hostname();
+          let subject = `${hostname}: Scheduled job ${job.name} was successful.`;
           sendEmail(to, subject, msg);
         }
       }, {
