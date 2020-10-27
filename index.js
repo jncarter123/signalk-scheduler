@@ -1,12 +1,17 @@
 const cron = require("node-cron");
 const os = require('os');
+const moment = require('moment');
+const fs = require('fs');
+const path = require('path');
 let shell = require("shelljs");
 let nodemailer = require("nodemailer");
 
 const PLUGIN_ID = 'signalk-scheduler'
 const PLUGIN_NAME = 'Scheduler'
 
+const JOBTYPES = ["Shell", "SignalK Put", "SignalK Backup"];
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const BACKUP_EXTENSION = '.backup';
 
 module.exports = function(app) {
   var plugin = {};
@@ -102,7 +107,8 @@ module.exports = function(app) {
               "title": "Command Type",
               "enum": [
                 "Shell",
-                "SignalK Put"
+                "SignalK Put",
+                "SignalK Backup"
               ]
             }
           },
@@ -136,6 +142,36 @@ module.exports = function(app) {
                     "value": {
                       "type": "string",
                       "title": "Value"
+                    }
+                  }
+                }, {
+                  "properties": {
+                    "commandType": {
+                      "enum": [
+                        "SignalK Backup"
+                      ]
+                    },
+                    "backupPath": {
+                      "type": "string",
+                      "title": "Backup Location",
+                      "description": "The location that backups should be stored."
+                    },
+                    "includePlugins": {
+                      "type": "boolean",
+                      "title": "Include Plugins",
+                      "description": "Selecting Yes will increase the size of the backup, but will allow for offline restore.",
+                      "default": false
+                    },
+                    "cleanup": {
+                      "type": "boolean",
+                      "title": "Cleanup Old files",
+                      "description": "Selecting Yes will delete old backup files.",
+                      "default": false
+                    },
+                    "numBackups": {
+                      "type": "number",
+                      "title": "Number of Backups to Keep.",
+                      "description": "The number of backups to be kept. All other backup files will be removed."
                     }
                   }
                 }
@@ -178,6 +214,9 @@ module.exports = function(app) {
   plugin.stop = function() {
     // Here we put logic we need when the plugin stops
     app.debug('Plugin stopped');
+    Object.keys(jobsTracker).forEach(key => {
+      jobsTracker[key].destroy()
+    });
   };
 
   plugin.registerWithRouter = function(router) {
@@ -381,6 +420,17 @@ module.exports = function(app) {
       jobsTracker[job.name] = newjob;
 
       app.debug(`Created cron job: ${schedule} SignalK Put ${job.path}=${job.value}`);
+    } else if (job.commandType == 'SignalK Backup') {
+
+      let newjob = cron.schedule(schedule, function() {
+        runBackupJob(job);
+      }, {
+        scheduled: job.enabled
+      });
+
+      jobsTracker[job.name] = newjob;
+
+      app.debug(`Created cron job: ${schedule} SignalK Backup ${job.backupPath}`);
     } else {
       app.error(`Job ${jobName} command type ${job.commandType} is not recognized.`);
     }
@@ -398,6 +448,120 @@ module.exports = function(app) {
     })
 
     return `0 ${minutes} ${hours} * * ${dayNums}`;
+  }
+
+  async function runBackupJob(job) {
+    const includePlugins = job.includePlugins ? 'true' : 'false';
+    const filename = `signalk-${moment().format('MMM-DD-YYYY-HHTmm')}${BACKUP_EXTENSION}`;
+
+    //create the backup
+    let backupStatus = await createBackup(job.backupPath, filename, includePlugins);
+    app.debug('Backup Status: ' + JSON.stringify(backupStatus));
+
+    //rotate backups
+    let deletedFiles;
+    if (job.cleanup) {
+      deletedFiles = await cleanupBackups(job.backupPath, job.numBackups);
+    }
+
+    //send an email
+    if (job.sendEmail) {
+      let to = job.toEmail;
+      let hostname = os.hostname();
+      let subject = `${hostname}: Scheduled job ${job.name}` + (backupStatus.success ? ' was successful.' : ' failed.');
+      let msg = 'Backup file ' + backupStatus.filename + (backupStatus.success ? ' was created. ' : ' was not created. ');
+      if (job.cleanup) {
+        if (deletedFiles.length > 0) {
+          msg += 'The following files were deleted during cleanup: \r\n';
+          deletedFiles.forEach(file => msg += `${file}\r\n`);
+        } else {
+          msg += `No files were deleted during cleanup.`;
+        }
+      }
+      sendEmail(to, subject, msg);
+    }
+  }
+
+  async function createBackup(path, filename, includePlugins) {
+    let port = app.config.settings.ssl ? app.config.settings.sslport : app.config.settings.port;
+    let protocol = app.config.settings.ssl ? 'https' : 'http';
+    const url = `${protocol}://localhost:${port}/backup?includePlugins=${includePlugins}`;
+    app.debug('URL: ' + url);
+
+
+    path = `${path}/${filename}`;
+    app.debug('backup path: ' + path);
+
+    let status = {
+      success: false,
+      filename: filename
+    };
+
+    const res = await fetch(url, {
+      credentials: 'include',
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/zip'
+      }
+    });
+
+    await new Promise((resolve, reject) => {
+      const fileStream = fs.createWriteStream(path);
+      res.body.pipe(fileStream);
+      res.body.on("error", (err) => {
+        app.error(err);
+        reject(err);
+      });
+      fileStream.on("finish", function() {
+        app.debug('Successfully created backup ' + path);
+        status.success = true;
+        resolve();
+      });
+    });
+
+    return status;
+  }
+
+  async function cleanupBackups(dirPath, numToKeep) {
+    let files = fs.readdirSync(dirPath, function(err, allFiles) {
+      files = allFiles.filter(function(e) {
+        return path.extname(e).toLowerCase() === BACKUP_EXTENSION
+      });
+    });
+
+    files.sort();
+    files.reverse();
+
+    app.debug("Backup Files: " + JSON.stringify(files));
+
+    let filesToDelete = [];
+    if (files.length > numToKeep) {
+      filesToDelete = files.slice(numToKeep);
+      let unlinkQueue = filesToDelete.map(function(file) {
+        return new Promise(function(resolve, reject) {
+          let filepath = dirPath + '/' + file;
+          app.debug('Deleting file ' + filepath);
+
+          fs.unlink(filepath, function(err) {
+            if (err) {
+              app.debug('File delete error: ' + err)
+              return reject(err);
+            } else {
+              app.debug('Deleted file ' + filepath);
+              resolve(file);
+            }
+          });
+        });
+      });
+      await Promise.all(unlinkQueue)
+        .then(function(files) {
+          app.debug('All files have been successfully removed');
+        })
+        .catch(function(err) {
+          app.error('File delete error: ' + err)
+        });
+    }
+    return filesToDelete;
   }
 
   function sendEmail(to, subject, text) {
@@ -465,8 +629,8 @@ module.exports = function(app) {
     }
 
     //make sure commandType is correct
-    if (job.commandType != 'Shell' && job.commandType != 'SignalK Put') {
-      return "commandType must be 'Shell' or 'SignalK Put'";
+    if (JOBTYPES.indexOf(job.commandType) == -1) {
+      return "commandType must be one of " + JOBTYPES;
     }
 
     //if commandType == shell
@@ -484,6 +648,15 @@ module.exports = function(app) {
         example.value = "1";
 
         return "commandType of 'SignalK Put' must include a 'path' and 'value' properties. " + JSON.stringify(example);
+      }
+    }
+
+    //if commandType == SignalK Put
+    if (job.commandType == 'SignalK Backup') {
+      if (!job.backupPath || !job.numBackups) {
+        example.backupPath = '/backups';
+        example.numBackups = 7;
+        return "commandType of 'SignalK Backup' must include a 'backupPath' and 'numBackups' properties. " + JSON.stringify(example);
       }
     }
 

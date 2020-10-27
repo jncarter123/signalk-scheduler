@@ -12,7 +12,9 @@
   "author": "Jeremy Carter",
   "license": "ISC",
   "dependencies": {
+    "moment": "^2.29.1",
     "node-cron": "^2.0.3",
+    "node-fetch": "^2.6.1",
     "nodemailer": "^6.4.6",
     "shelljs": "^0.8.3"
   }
