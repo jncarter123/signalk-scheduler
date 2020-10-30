@@ -9,7 +9,7 @@ let nodemailer = require("nodemailer");
 const PLUGIN_ID = 'signalk-scheduler'
 const PLUGIN_NAME = 'Scheduler'
 
-const JOBTYPES = ["Shell", "SignalK Put", "SignalK Backup"];
+const JOBTYPES = ["Shell", "SignalK Put", "SignalK Puts", "SignalK Backup"];
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const BACKUP_EXTENSION = '.backup';
 
@@ -105,11 +105,7 @@ module.exports = function(app) {
             "commandType": {
               "type": "string",
               "title": "Command Type",
-              "enum": [
-                "Shell",
-                "SignalK Put",
-                "SignalK Backup"
-              ]
+              "enum": JOBTYPES
             }
           },
           "dependencies": {
@@ -142,6 +138,32 @@ module.exports = function(app) {
                     "value": {
                       "type": "string",
                       "title": "Value"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "commandType": {
+                      "enum": [
+                        "SignalK Puts"
+                      ]
+                    },
+                    "skputs": {
+                      "type": "array",
+                      "title": "SK Puts",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "type": "string",
+                            "title": "SignalK Path"
+                          },
+                          "value": {
+                            "type": "string",
+                            "title": "Value"
+                          }
+                        }
+                      }
                     }
                   }
                 }, {
@@ -380,8 +402,7 @@ module.exports = function(app) {
       newjob = cron.schedule(schedule, function() {
 
         shell.exec(job.command, function(code, stdout, stderr) {
-          let hostname = os.hostname();
-          let msg = `${hostname}: Scheduled job ${job.name} ${code != 0 ? 'failed' : 'was successful'}.`;
+          let msg = `Scheduled job ${job.name} ${code != 0 ? 'failed' : 'was successful'}.`;
           let msgDetails = `Host: ${hostname} \r\nExit Code: ${code} \r\nProgram output: ${stdout} \r\nProgram error: ${stderr}`;
 
           if (code != 0) {
@@ -399,27 +420,16 @@ module.exports = function(app) {
 
       jobsTracker[job.name] = newjob;
 
-      app.debug(`Created cron job: ${schedule} Shell Command ${job.command}`);
-    } else if (job.commandType == 'SignalK Put') {
+    } else if (job.commandType == 'SignalK Put' || job.commandType == 'SignalK Puts') {
+
       let newjob = cron.schedule(schedule, function() {
-        app.putSelfPath(job.path, job.value);
-
-        let msg = `${job.path} set to ${job.value}`;
-        app.debug(msg);
-
-        if (job.sendEmail) {
-          let to = job.toEmail;
-          let hostname = os.hostname();
-          let subject = `${hostname}: Scheduled job ${job.name} was successful.`;
-          sendEmail(to, subject, msg);
-        }
+        runPutJob(job);
       }, {
         scheduled: job.enabled
       });
 
       jobsTracker[job.name] = newjob;
 
-      app.debug(`Created cron job: ${schedule} SignalK Put ${job.path}=${job.value}`);
     } else if (job.commandType == 'SignalK Backup') {
 
       let newjob = cron.schedule(schedule, function() {
@@ -430,11 +440,11 @@ module.exports = function(app) {
 
       jobsTracker[job.name] = newjob;
 
-      app.debug(`Created cron job: ${schedule} SignalK Backup ${job.backupPath}`);
     } else {
-      app.error(`Job ${jobName} command type ${job.commandType} is not recognized.`);
+      app.error(`Job ${job.name} command type ${job.commandType} is not recognized.`);
     }
 
+    app.debug(`Created cron job: ${job.name} - ${job.commandType} - ${schedule}`);
     return newjob;
   }
 
@@ -448,6 +458,71 @@ module.exports = function(app) {
     })
 
     return `0 ${minutes} ${hours} * * ${dayNums}`;
+  }
+
+  function runPutJob(job) {
+    let jobQueue = sendSkPut(job);
+
+    Promise.all(jobQueue)
+      .then((values) => {
+        let msg = '';
+        let failure = 0;
+        values.forEach(function(value) {
+          if (value.statusCode === 200){
+            msg += `${value.path} was set to ${value.value}.\r\n`
+          } else {
+            failure++;
+            msg += `ERROR: ${value.path} was not set to ${value.value}.\r\n`
+          }
+        })
+        if (job.sendEmail) {
+          let to = job.toEmail;
+          let subject = `Scheduled job ${job.name} `;
+          if(failure > 0){
+            subject += `had ${failure} failures.`;
+          } else {
+            subject += 'was successful.';
+          }
+          sendEmail(to, subject, msg);
+        }
+      })
+      .catch(function(err) {
+        app.error('Job execution error: ' + err);
+        if (job.sendEmail) {
+          let to = job.toEmail;
+          let subject = `Scheduled job ${job.name} failed.`;
+          sendEmail(to, subject, err);
+        }
+      });
+  }
+
+  function sendSkPut(job) {
+    if (job.hasOwnProperty('path')) {
+      job.skputs = [{
+        path: job.path,
+        value: job.value
+      }];
+    }
+
+    return job.skputs.map(function(subjob) {
+      return new Promise(function(resolve, reject) {
+        app.putSelfPath(subjob.path, subjob.value, res => {
+          app.debug(JSON.stringify(res))
+          if (res.state == 'COMPLETED') {
+            res.path = subjob.path;
+            res.value = subjob.value;
+
+            if (res.statusCode === 200) {
+              app.debug(`Job ${job.name} executed ${subjob.path} set to ${subjob.value}`);
+              resolve(res);
+            } else {
+              app.debug(`Job ${job.name} execution error ${res.statusCode} ${res.message} while settting ${subjob.path} to ${subjob.value}`);
+              return reject(res);
+            }
+          }
+        });
+      });
+    });
   }
 
   async function runBackupJob(job) {
@@ -467,8 +542,7 @@ module.exports = function(app) {
     //send an email
     if (job.sendEmail) {
       let to = job.toEmail;
-      let hostname = os.hostname();
-      let subject = `${hostname}: Scheduled job ${job.name}` + (backupStatus.success ? ' was successful.' : ' failed.');
+      let subject = `Scheduled job ${job.name}` + (backupStatus.success ? ' was successful.' : ' failed.');
       let msg = 'Backup file ' + backupStatus.filename + (backupStatus.success ? ' was created. ' : ' was not created. ');
       if (job.cleanup) {
         if (deletedFiles.length > 0) {
@@ -574,6 +648,8 @@ module.exports = function(app) {
         "pass": jobOptions.mail.password
       }
     });
+
+    subject = `${os.hostname()}: ${subject}`;
 
     //use text or html
     var mailOptions = {
