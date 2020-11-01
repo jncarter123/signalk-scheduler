@@ -500,21 +500,9 @@ module.exports = function(app) {
 
     let newjob;
     if (job.commandType == 'Shell') {
+
       newjob = cron.schedule(schedule, function() {
-
-        shell.exec(job.command, function(code, stdout, stderr) {
-          let msg = `Scheduled job ${job.name} ${code != 0 ? 'failed' : 'was successful'}.`;
-          let msgDetails = `Host: ${hostname} \r\nExit Code: ${code} \r\nProgram output: ${stdout} \r\nProgram error: ${stderr}`;
-
-          if (code != 0) {
-            app.error(msg);
-            app.error(msgDetails);
-          }
-
-          if (job.sendEmail) {
-            sendEmail(job.toEmail, msg, msgDetails);
-          }
-        });
+        runShellJob(job);
       }, {
         scheduled: job.enabled
       });
@@ -621,6 +609,22 @@ module.exports = function(app) {
     } else {
       return moment(time).add(minutes, 'm').format('HH:mm');
     }
+  }
+
+  function runShellJob(job){
+    shell.exec(job.command, function(code, stdout, stderr) {
+      let msg = `Scheduled job ${job.name} ${code != 0 ? 'failed' : 'was successful'}.`;
+      let msgDetails = `Host: ${hostname} \r\nExit Code: ${code} \r\nProgram output: ${stdout} \r\nProgram error: ${stderr}`;
+
+      if (code != 0) {
+        app.error(msg);
+        app.error(msgDetails);
+      }
+
+      if (job.sendEmail) {
+        sendEmail(job.toEmail, msg, msgDetails);
+      }
+    });
   }
 
   function runPutJob(job) {
