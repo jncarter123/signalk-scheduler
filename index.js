@@ -78,10 +78,14 @@ module.exports = function(app) {
               "type": "boolean",
               "title": "Send Email"
             },
-            "time": {
+            "event": {
               "type": "string",
-              "title": "Time (24hr)",
-              "pattern": "^[0-2]\\d:[0-5]\\d$"
+              "title": "Event",
+              "enum": [
+                "Set Time",
+                "Event Time"
+              ],
+              "default": "Set Time"
             },
             "days": {
               "type": "array",
@@ -189,11 +193,6 @@ module.exports = function(app) {
                       "title": "Cleanup Old files",
                       "description": "Selecting Yes will delete old backup files.",
                       "default": false
-                    },
-                    "numBackups": {
-                      "type": "number",
-                      "title": "Number of Backups to Keep.",
-                      "description": "The number of backups to be kept. All other backup files will be removed."
                     }
                   }
                 }
@@ -214,9 +213,81 @@ module.exports = function(app) {
                   }
                 }
               }]
+            },
+            "event": {
+              "oneOf": [{
+                  "properties": {
+                    "event": {
+                      "enum": [
+                        "Set Time"
+                      ]
+                    },
+                    "time": {
+                      "type": "string",
+                      "title": "Time (24hr)",
+                      "pattern": "^[0-2]\\d:[0-5]\\d$"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "event": {
+                      "enum": [
+                        "Event Time"
+                      ]
+                    },
+                    "eventPath": {
+                      "type": "string",
+                      "title": 'Event Path',
+                      "description": 'SK Path that contains a properly formatted date. Ex. environment.sunlight.times.sunset'
+                    },
+                    "offset": {
+                      "type": "string",
+                      "title": "Offset +/- hr:min",
+                      "description": "Rather than starting at the event time, you can start before or after. Ex. turn on your deck lights 10 minutes before sunset.",
+                      "pattern": "^[+-][0-2]\\d:[0-5]\\d$"
+                    }
+                  }
+                }
+              ]
+            },
+            "cleanup": {
+              "oneOf": [{
+                "properties": {
+                  "cleanup": {
+                    "enum": [
+                      true
+                    ]
+                  },
+                  "numBackups": {
+                    "type": "number",
+                    "title": "Number of Backups to Keep.",
+                    "description": "The number of backups to be kept. All other backup files will be removed."
+                  }
+                }
+              }]
             }
           }
         }
+      }
+    }
+  }
+
+  plugin.uiSchema = {
+    "job": {
+      "items": {
+        'ui:order': [
+          'name',
+          'enabled',
+          'sendEmail',
+          'toEmail',
+          'event',
+          'eventPath',
+          'offset',
+          'time',
+          'days',
+          '*' // all undefined ones come here.
+        ]
       }
     }
   }
@@ -226,11 +297,17 @@ module.exports = function(app) {
     jobsTracker = {};
     jobOptions = options;
 
-    for (var jobName in options.job) {
-      let job = options.job[jobName];
+    //runs once a day to update schedules based on event times
+    createInternalJobs();
 
+    //schedule all of the static jobs
+    let staticJobs = options.job.filter(job => job.event === 'Set Time');
+    staticJobs.forEach((job) => {
       createJob(job);
-    }
+    });
+
+    //add a short delay after startup to insure that event data will be ready
+    setTimeout(updateSchedules, 30000);
   };
 
   plugin.stop = function() {
@@ -360,9 +437,9 @@ module.exports = function(app) {
 
     router.delete("/jobs/:jobid", (req, res) => {
       let jobid = req.params.jobid;
-      let job = jobsTracker[jobid];
+      let jobDeleted = deleteJob(jobid);
 
-      if (!job) {
+      if (!jobDeleted) {
         let msg = 'No job found for ' + jobid
         app.debug(msg)
         res.status(400)
@@ -382,20 +459,44 @@ module.exports = function(app) {
         return;
       }
 
-      job.destroy();
-
-      //remove job from the jobsTracker
-      delete jobsTracker[jobid];
-
       res.json({
         status: 'destroyed'
       });
     })
   }
 
+  function createInternalJobs() {
+    let job = {
+      "name": "INTERNAL___updateSchedules",
+      "enabled": true,
+      "sendEmail": false,
+      "event": "Set Time",
+      "days": [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday"
+      ],
+      "commandType": "internalJobs",
+      "time": "00:00"
+    };
+
+    createJob(job);
+  }
+
   function createJob(job) {
-    app.debug(`Creating schedule for job ${job.name}`);
-    let schedule = createSchedule(job.time, job.days);
+    let time = job.event === 'Set Time' ? job.time : getEventTime(job.eventPath, job.offset);
+    app.debug(`${job.name} time: ${time}`);
+
+    if (!time) {
+      app.error(`Job ${job.name} was not scheduled because of an issue with the time.`)
+      return;
+    }
+
+    let schedule = createSchedule(time, job.days);
 
     let newjob;
     if (job.commandType == 'Shell') {
@@ -440,12 +541,33 @@ module.exports = function(app) {
 
       jobsTracker[job.name] = newjob;
 
+    } else if (job.commandType == 'internalJobs'){
+
+      let newjob = cron.schedule(schedule, function() {
+        updateSchedules();
+      }, {
+        scheduled: job.enabled
+      });
+
+      jobsTracker[job.name] = newjob;
+
     } else {
       app.error(`Job ${job.name} command type ${job.commandType} is not recognized.`);
     }
 
-    app.debug(`Created cron job: ${job.name} - ${job.commandType} - ${schedule}`);
+    app.debug(`${job.enabled ? 'Enabled' : 'Disabled'} cron job: ${job.name} - ${job.commandType} - ${schedule}`);
     return newjob;
+  }
+
+  function deleteJob(jobName) {
+    let cronjob = jobsTracker[jobName];
+    if (cronjob) {
+      cronjob.destroy();
+      delete jobsTracker[jobName];
+      return true;
+    }
+
+    return false;
   }
 
   function createSchedule(time, days) {
@@ -460,6 +582,47 @@ module.exports = function(app) {
     return `0 ${minutes} ${hours} * * ${dayNums}`;
   }
 
+  function updateSchedules() {
+    //look for jobs that are event based
+    let eventJobs = jobOptions.job.filter(job => job.event === 'Event Time');
+
+    eventJobs.forEach((job) => {
+      //delete the job
+      deleteJob(job.name);
+
+      //create the new job
+      createJob(job);
+    });
+
+  }
+
+  function getEventTime(eventPath, offset) {
+    let event = app.getSelfPath(eventPath);
+    if (!event) {
+      app.error(`No event info found for ${eventPath}`);
+      return null;
+    }
+
+    let time = Date.parse(event.value);
+    if (isNaN(time)) {
+      app.error(`Could not calculate event time for ${eventPath} with offset ${offset}`);
+      return null;
+    }
+
+    let operator = offset[0];
+    let minutes = moment.duration({
+      minutes: offset.slice(1).split(':')[1],
+      hours: offset.slice(1).split(':')[0]
+    }).asMinutes();
+    app.debug(`Offset minutes: ${operator}${minutes}`);
+
+    if (operator === '-') {
+      return moment(time).subtract(minutes, 'm').format('HH:mm');
+    } else {
+      return moment(time).add(minutes, 'm').format('HH:mm');
+    }
+  }
+
   function runPutJob(job) {
     let jobQueue = sendSkPut(job);
 
@@ -468,7 +631,7 @@ module.exports = function(app) {
         let msg = '';
         let failure = 0;
         values.forEach(function(value) {
-          if (value.statusCode === 200){
+          if (value.statusCode === 200) {
             msg += `${value.path} was set to ${value.value}.\r\n`
           } else {
             failure++;
@@ -478,7 +641,7 @@ module.exports = function(app) {
         if (job.sendEmail) {
           let to = job.toEmail;
           let subject = `Scheduled job ${job.name} `;
-          if(failure > 0){
+          if (failure > 0) {
             subject += `had ${failure} failures.`;
           } else {
             subject += 'was successful.';
