@@ -301,13 +301,16 @@ module.exports = function(app) {
     createInternalJobs();
 
     //schedule all of the static jobs
-    let staticJobs = options.job.filter(job => job.event === 'Set Time');
+    let staticJobs = options.job.filter(job => job.hasOwnProperty('time'));
     staticJobs.forEach((job) => {
       createJob(job);
     });
 
     //add a short delay after startup to insure that event data will be ready
     setTimeout(updateSchedules, 30000);
+
+    let numJobs = Object.keys(jobsTracker).length;
+    app.setPluginStatus(`${numJobs} jobs have been scheduled.`);
   };
 
   plugin.stop = function() {
@@ -488,7 +491,7 @@ module.exports = function(app) {
   }
 
   function createJob(job) {
-    let time = job.event === 'Set Time' ? job.time : getEventTime(job.eventPath, job.offset);
+    let time = job.hasOwnProperty('time') ? job.time : getEventTime(job.eventPath, job.offset);
     app.debug(`${job.name} time: ${time}`);
 
     if (!time) {
@@ -507,43 +510,39 @@ module.exports = function(app) {
         scheduled: job.enabled
       });
 
-      jobsTracker[job.name] = newjob;
-
     } else if (job.commandType == 'SignalK Put' || job.commandType == 'SignalK Puts') {
 
-      let newjob = cron.schedule(schedule, function() {
+      newjob = cron.schedule(schedule, function() {
         runPutJob(job);
       }, {
         scheduled: job.enabled
       });
 
-      jobsTracker[job.name] = newjob;
-
     } else if (job.commandType == 'SignalK Backup') {
 
-      let newjob = cron.schedule(schedule, function() {
+      newjob = cron.schedule(schedule, function() {
         runBackupJob(job);
       }, {
         scheduled: job.enabled
       });
 
-      jobsTracker[job.name] = newjob;
-
     } else if (job.commandType == 'internalJobs'){
 
-      let newjob = cron.schedule(schedule, function() {
+      newjob = cron.schedule(schedule, function() {
         updateSchedules();
       }, {
         scheduled: job.enabled
       });
 
-      jobsTracker[job.name] = newjob;
-
     } else {
       app.error(`Job ${job.name} command type ${job.commandType} is not recognized.`);
     }
 
-    app.debug(`${job.enabled ? 'Enabled' : 'Disabled'} cron job: ${job.name} - ${job.commandType} - ${schedule}`);
+    if(newjob){
+      jobsTracker[job.name] = newjob;
+      app.debug(`${job.enabled ? 'Enabled' : 'Disabled'} cron job: ${job.name} - ${job.commandType} - ${schedule}`);
+    }
+
     return newjob;
   }
 
@@ -582,6 +581,8 @@ module.exports = function(app) {
       createJob(job);
     });
 
+    let numJobs = Object.keys(jobsTracker).length;
+    app.setPluginStatus(`${numJobs} jobs have been scheduled.`);
   }
 
   function getEventTime(eventPath, offset) {
