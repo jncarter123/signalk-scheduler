@@ -1,6 +1,6 @@
 {
   "name": "signalk-scheduler",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Cron like scheduler for SignalK",
   "main": "index.js",
   "scripts": {
