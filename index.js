@@ -526,7 +526,7 @@ module.exports = function(app) {
         scheduled: job.enabled
       });
 
-    } else if (job.commandType == 'internalJobs'){
+    } else if (job.commandType == 'internalJobs') {
 
       newjob = cron.schedule(schedule, function() {
         updateSchedules();
@@ -538,7 +538,7 @@ module.exports = function(app) {
       app.error(`Job ${job.name} command type ${job.commandType} is not recognized.`);
     }
 
-    if(newjob){
+    if (newjob) {
       jobsTracker[job.name] = newjob;
       app.debug(`${job.enabled ? 'Enabled' : 'Disabled'} cron job: ${job.name} - ${job.commandType} - ${schedule}`);
     }
@@ -612,7 +612,7 @@ module.exports = function(app) {
     }
   }
 
-  function runShellJob(job){
+  function runShellJob(job) {
     shell.exec(job.command, function(code, stdout, stderr) {
       let msg = `Scheduled job ${job.name} ${code != 0 ? 'failed' : 'was successful'}.`;
       let msgDetails = `Host: ${hostname} \r\nExit Code: ${code} \r\nProgram output: ${stdout} \r\nProgram error: ${stderr}`;
@@ -715,7 +715,7 @@ module.exports = function(app) {
       if (job.cleanup) {
         if (deletedFiles.length > 0) {
           msg += 'The following files were deleted during cleanup: \r\n';
-          deletedFiles.forEach(file => msg += `${file}\r\n`);
+          deletedFiles.forEach(file => msg += `${file.name}\r\n`);
         } else {
           msg += `No files were deleted during cleanup.`;
         }
@@ -765,23 +765,31 @@ module.exports = function(app) {
   }
 
   async function cleanupBackups(dirPath, numToKeep) {
-    let files = fs.readdirSync(dirPath, function(err, allFiles) {
-      files = allFiles.filter(function(e) {
-        return path.extname(e).toLowerCase() === BACKUP_EXTENSION
+
+    let dirents = fs.readdirSync(dirPath, {
+        withFileTypes: true
+      })
+      .filter(e => e.isFile() && path.extname(e.name).toLowerCase() === BACKUP_EXTENSION);
+
+    let files = dirents.map(function(file) {
+        let time = fs.statSync(dirPath + '/' + file.name).birthtimeMs;
+        return {
+          name: file.name,
+          time: time
+        }
+      })
+      .sort(function(a, b) {
+        return b.time - a.time;
       });
-    });
 
-    files.sort();
-    files.reverse();
-
-    app.debug("Backup Files: " + JSON.stringify(files));
+    app.debug("Backup Files sorted: " + JSON.stringify(files));
 
     let filesToDelete = [];
     if (files.length > numToKeep) {
       filesToDelete = files.slice(numToKeep);
       let unlinkQueue = filesToDelete.map(function(file) {
         return new Promise(function(resolve, reject) {
-          let filepath = dirPath + '/' + file;
+          let filepath = dirPath + '/' + file.name;
           app.debug('Deleting file ' + filepath);
 
           fs.unlink(filepath, function(err) {
