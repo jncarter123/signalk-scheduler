@@ -655,11 +655,12 @@ module.exports = function(app) {
         }
       })
       .catch(function(err) {
-        app.error('Job execution error: ' + err);
+        let msg = `Job execution error: ${err.statusCode} ${err.message}`;
+        app.error(msg);
         if (job.sendEmail) {
           let to = job.toEmail;
           let subject = `Scheduled job ${job.name} failed.`;
-          sendEmail(to, subject, err);
+          sendEmail(to, subject, msg);
         }
       });
   }
