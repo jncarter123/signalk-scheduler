@@ -1,6 +1,6 @@
 {
   "name": "signalk-scheduler",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Cron like scheduler for SignalK",
   "main": "index.js",
   "scripts": {
@@ -15,7 +15,7 @@
     "moment": "^2.29.1",
     "node-cron": "^2.0.3",
     "node-fetch": "^2.6.1",
-    "nodemailer": "^6.4.6",
+    "nodemailer": ">=6.4.16",
     "shelljs": "^0.8.3"
   }
 }
