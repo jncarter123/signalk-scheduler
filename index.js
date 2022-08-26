@@ -675,7 +675,7 @@ module.exports = function(app) {
 
     return job.skputs.map(function(subjob) {
       return new Promise(function(resolve, reject) {
-        app.putSelfPath(subjob.path, subjob.value, res => {
+        app.putSelfPath(subjob.path, Number.isInteger(subjob.value) ? parseInt(subjob.value) : subjob.value, res => {
           app.debug(JSON.stringify(res))
           if (res.state == 'COMPLETED') {
             res.path = subjob.path;
