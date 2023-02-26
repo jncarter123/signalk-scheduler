@@ -728,7 +728,7 @@ module.exports = function(app) {
   async function createBackup(path, filename, includePlugins) {
     let port = app.config.settings.ssl ? app.config.settings.sslport : app.config.settings.port;
     let protocol = app.config.settings.ssl ? 'https' : 'http';
-    const url = `${protocol}://localhost:${port}/backup?includePlugins=${includePlugins}`;
+    const url = `${protocol}://localhost:${port}/skServer/backup?includePlugins=${includePlugins}`;
     app.debug('URL: ' + url);
 
 
